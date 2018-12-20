@@ -1,0 +1,19 @@
+#!/bin/bash
+
+echo "Make sure Xcode is not running before continuing."
+read -r -p "Are you sure? [y/N] " response
+case "$response" in
+    [yY][eE][sS]|[yY]) 
+        
+	rm -rf ~/Library/Developer/CoreSimulator
+	rm -rf ~/Library/Caches/com.apple.dt.Xcode
+	rm -rf ~/Library/Application Support/Xcode
+	rm -rf ~/Library/Developer/Xcode
+
+	echo 'All data has been removed. You can now run Xcode.'
+	
+        ;;
+    *)
+        #do_something_else
+        ;;
+esac

@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+# Requirements
+require 'highline/import'
+
+# Program name
+program_name = $PROGRAM_NAME.split("/").last
+
+# Check for help argument
+if ARGV.include?('--help')
+	puts \
+"""Use this script to remove git local-only branches.
+
+Author		Svetislav Markovic
+Date		2018/11/02
+Version		1.0
+
+usage: #{} [-hf] [--help] [--force]
+
+	f, -force	: Force delition of not fully merged branches ( USE THIS WITH CAUTION )
+	h, -help	: List all available commands
+
+"""
+	return
+end
+
+# Define prompts
+def yesno(prompt = 'Continue?', default = true)
+  a = ''
+  s = default ? '[Y/n]' : '[y/N]'
+  d = default ? 'y' : 'n'
+  until %w[y n].include? a
+    a = ask("#{prompt} #{s} ") { |q| q.limit = 1; q.case = :downcase }
+    a = d if a.length == 0
+  end
+  a == 'y'
+end
+
+# Test is working directory git repository
+unless system("git rev-parse --is-inside-git-dir > /dev/null 2>&1")
+	
+	# get working directory
+	pwd = %x(pwd)
+
+	# Remove ending new lines
+	pwd.slice! "\n"
+
+	# Show error
+	STDERR.puts "Error: '#{pwd}' isn't git repository"
+	return
+end
+
+# Test for changes
+number_of_changes = %x( git status --porcelain | wc -l ).to_i
+
+# Make sure repository is clean
+if number_of_changes > 0 
+	STDERR.puts "Error: Repository isn't clean. Commit your changes or reset repository first."
+	return
+end
+
+# Check force aurument
+forced = ARGV.include?('--force') || ARGV.include?('-f')
+
+# Print force mode notice
+puts "CAUTION: Started in --force mode. Not fully merged branches may be deleted!" if forced
+
+# Placeholder for current branch
+current_branch = nil
+
+# Extract local branches
+locals = %x( git branch -l ).each_line.map do |a|
+
+	# Save as current branch is asterix is preset
+	current_branch = a unless a.slice!("* ") == nil
+
+	# Remove ending new lines
+	a.slice! "\n"
+
+	# Trimm whitespaces
+	a.strip
+end
+
+# Extract remote branches
+remotes = %x( git branch -r ).each_line.map do |a|
+
+	# Strip remote naming prefix
+	a.slice! "  origin/"
+
+	# Remove ending new lines
+	a.slice! "\n"
+
+	# Trimm whitespaces
+	a.strip
+end
+
+# Filter only local branch names
+only_locals = locals.select { |branch| !remotes.include?(branch) }
+
+if only_locals.empty?
+	puts "No local only bracnhes. You're ready to go! :)"
+	return
+end
+
+if only_locals.include? current_branch 
+	STDERR.puts "Error: Current branch '#{current_branch}' has no remote upstream but cannot be removed. Switch branch and run command again."
+	return
+end
+
+# Start removing procces
+only_locals.each do |branch|
+	output = %x( git branch -#{ forced ? 'D' : 'd' } #{branch} 2>&1 ) if yesno("Do you want to delete #{branch}? ")
+	STDERR.puts \
+"""Error: Branch #{branch} is not deleted because it's not fully merged.
+Deleting this branch will remove some changesets permanently.
+If you are sure you want to delete it, run: #{program_name} --force
+""" if output != nil && output.include?("not fully merged")
+end

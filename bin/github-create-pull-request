@@ -1,0 +1,4 @@
+#!/bin/bash
+result=$(git rev-parse --abbrev-ref HEAD)
+echo Redirect to GitHub create pull request page for branch $result
+open "https://github.com/shiftplanning/iHumanity/compare/develop...$result?expand=1"

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+rm ~/.gemrc
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/gemrc" ~/.gemrc
+
+rm -rf ~/.ssh
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/ssh/" ~/.ssh
+
+rm ~/.zshrc
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/zshrc" ~/.zshrc
+
+rm ~/.gitconfig
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/gitconfig" ~/.gitconfig
+
+rm ~/.gitignore_global
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/gitignore_global" ~/.gitignore_global
+
+rm -rf ~/.oh-my-zsh
+ln -s "/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/scripts/oh-my-zsh/" ~/.oh-my-zsh
+
+brew install zsh
+
+chsh -s $(which zsh)
+
+source ~/.zshrc

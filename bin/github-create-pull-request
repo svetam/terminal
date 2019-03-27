@@ -1,4 +1,24 @@
-#!/bin/bash
-result=$(git rev-parse --abbrev-ref HEAD)
-echo Redirect to GitHub create pull request page for branch $result
-open "https://github.com/shiftplanning/iHumanity/compare/develop...$result?expand=1"
+#!/usr/bin/env ruby
+
+is_git_dir = system "git rev-parse --is-inside-git-dir > /dev/null 2>&1"
+
+if is_git_dir
+
+	# Get origin path
+	repo = %x(git config --get remote.origin.url).split(':').last
+	repo.slice!('.git')
+	repo.slice!("\n")
+
+	# Get current branch
+	branch = %x(git rev-parse --abbrev-ref HEAD)
+	
+	# Open pull commit url
+	puts "Redirect to GitHub create pull request to develop page for branch #{branch}"
+	system "open 'https://github.com/#{repo}/compare/develop...#{branch}?expand=1'"
+else
+	# Program name
+	program_name = $PROGRAM_NAME.split("/").last
+
+	puts "#{program_name} must be executed within git repository"
+end
+	

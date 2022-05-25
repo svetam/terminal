@@ -1,10 +1,12 @@
 #!/usr/bin/env ruby
 
 # Requirements
-# require 'highline/import' rescue begin
-# 	STDERR.puts "Highline gem is reguired in order for script to work. Please execute \"gem install highline\" and try again."
-# 	exit -1
-# end
+begin
+	require 'highline/import'
+rescue LoadError => _e
+	STDERR.puts "Highline gem is reguired in order for script to work. Please execute \"gem install highline\" and then try again."
+	exit -1
+end
 
 # Program name
 program_name = $PROGRAM_NAME.split("/").last
@@ -30,6 +32,9 @@ usage: #{program_name} [-hf] [--help] [--force] <develop_branch>
 	-h, --help	: List all available commands
 
 CHANGELOG:
+
+	v1.1.1	Highline restored.
+		Develop branch is now pulled before cleaning is started.
 
 	v1.1.0	Added support to select develop branch.
 		This is mandatory in order to check are local only braches fully merged.
@@ -136,6 +141,17 @@ if output != nil && output.include?("did not match")
 	STDERR.puts "Error: Provided develop branch \"#{$develop_branch}\" does not exist"
 	exit -1
 end
+
+# Pull last changes from develop
+output = %x( git pull 2>&1 )
+if output != nil && output.include?("no such ref")
+	STDERR.puts "Warning: Develop branch \"#{$develop_branch}\" has no upstream ref."
+	unless yesno("Are you sure you want to continue? ") 
+		return_to_original_branch
+		exit -1
+	end
+end
+
 
 if only_locals.include? $develop_branch 
 	STDERR.puts "Error: Current branch '#{$develop_branch}' has no remote upstream but cannot be removed. Switch branch and run command again."

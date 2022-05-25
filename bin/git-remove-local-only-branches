@@ -1,24 +1,40 @@
 #!/usr/bin/env ruby
 
 # Requirements
-require 'highline/import'
+# require 'highline/import' rescue begin
+# 	STDERR.puts "Highline gem is reguired in order for script to work. Please execute \"gem install highline\" and try again."
+# 	exit -1
+# end
 
 # Program name
 program_name = $PROGRAM_NAME.split("/").last
 
+# Check force aurument
+forced = ARGV.include?('--force') || ARGV.include?('-f')
+
+# Develop branch
+$develop_branch = ARGV.reject { |a| a[0] == '-' }.first
+
 # Check for help argument
-if ARGV.include?('--help')
+if ARGV.include?('--help') || $develop_branch.nil? || $develop_branch.empty?
 	puts \
 """Use this script to remove git local-only branches.
 
 Author		Svetislav Markovic
 Date		2018/11/02
-Version		1.0
+Version		1.1.0
 
-usage: #{} [-hf] [--help] [--force]
+usage: #{program_name} [-hf] [--help] [--force] <develop_branch>
 
-	f, -force	: Force delition of not fully merged branches ( USE THIS WITH CAUTION )
-	h, -help	: List all available commands
+	-f, --force	: Force delition of not fully merged branches ( USE THIS WITH CAUTION )
+	-h, --help	: List all available commands
+
+CHANGELOG:
+
+	v1.1.0	Added support to select develop branch.
+		This is mandatory in order to check are local only braches fully merged.
+
+	v1.0.0	Remove brances without existing origin upstream.
 
 """
 	return
@@ -59,26 +75,38 @@ if number_of_changes > 0
 	return
 end
 
-# Check force aurument
-forced = ARGV.include?('--force') || ARGV.include?('-f')
+# puts "GitFlow: Don't forget to switch to develop branch before running cleanup to avoid false not fully merged warnings."
+
+# Fetch and prune branches
+%x( git fetch --prune )
 
 # Print force mode notice
 puts "CAUTION: Started in --force mode. Not fully merged branches may be deleted!" if forced
 
 # Placeholder for current branch
-current_branch = nil
+$current_branch = nil
 
 # Extract local branches
 locals = %x( git branch -l ).each_line.map do |a|
 
 	# Save as current branch is asterix is preset
-	current_branch = a unless a.slice!("* ") == nil
+	$current_branch = a unless a.slice!("* ") == nil
 
 	# Remove ending new lines
 	a.slice! "\n"
 
 	# Trimm whitespaces
 	a.strip
+end
+
+def return_to_original_branch
+	return if $current_branch == $develop_branch
+
+	exists = !%x( git show-ref #{$current_branch} 2>/dev/null ).strip.empty?
+	puts "#{$current_branch} brach was removed. Switched to #{$develop_branch}" unless exists
+	return unless exists
+
+	%x( git checkout #{$current_branch} 2>&1 )
 end
 
 # Extract remote branches
@@ -95,16 +123,24 @@ remotes = %x( git branch -r ).each_line.map do |a|
 end
 
 # Filter only local branch names
-only_locals = locals.select { |branch| !remotes.include?(branch) }
+only_locals = locals.select { |branch| !remotes.include?(branch) }.reject { |branch| branch == $develop_branch }
 
-if only_locals.empty?
-	puts "No local only bracnhes. You're ready to go! :)"
-	return
+# if only_locals.empty?
+# 	puts "No local only bracnhes. You're ready to go! :)"
+# 	return
+# end
+
+# Switch to develop
+output = %x( git checkout #{$develop_branch} 2>&1 )
+if output != nil && output.include?("did not match")
+	STDERR.puts "Error: Provided develop branch \"#{$develop_branch}\" does not exist"
+	exit -1
 end
 
-if only_locals.include? current_branch 
-	STDERR.puts "Error: Current branch '#{current_branch}' has no remote upstream but cannot be removed. Switch branch and run command again."
-	return
+if only_locals.include? $develop_branch 
+	STDERR.puts "Error: Current branch '#{$develop_branch}' has no remote upstream but cannot be removed. Switch branch and run command again."
+	return_to_original_branch
+	exit -1
 end
 
 # Start removing procces
@@ -116,3 +152,5 @@ Deleting this branch will remove some changesets permanently.
 If you are sure you want to delete it, run: #{program_name} --force
 """ if output != nil && output.include?("not fully merged")
 end
+
+return_to_original_branch

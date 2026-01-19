@@ -88,21 +88,11 @@ end
 # Print force mode notice
 puts "CAUTION: Started in --force mode. Not fully merged branches may be deleted!" if forced
 
-# Placeholder for current branch
-$current_branch = nil
+# Get current branch name
+$current_branch = %x( git rev-parse --abbrev-ref HEAD ).strip
 
-# Extract local branches
-locals = %x( git branch -l ).each_line.map do |a|
-
-	# Save as current branch is asterix is preset
-	$current_branch = a unless a.slice!("* ") == nil
-
-	# Remove ending new lines
-	a.slice! "\n"
-
-	# Trimm whitespaces
-	a.strip
-end
+# Extract local branches using for-each-ref (works reliably across worktrees)
+locals = %x( git for-each-ref --format='%(refname:short)' refs/heads/ ).each_line.map(&:strip)
 
 def return_to_original_branch
 	return if $current_branch == $develop_branch
@@ -114,18 +104,12 @@ def return_to_original_branch
 	%x( git checkout #{$current_branch} 2>&1 )
 end
 
-# Extract remote branches
-remotes = %x( git branch -r ).each_line.map do |a|
-
-	# Strip remote naming prefix
-	a.slice! "  origin/"
-
-	# Remove ending new lines
-	a.slice! "\n"
-
-	# Trimm whitespaces
-	a.strip
-end
+# Extract remote branches using for-each-ref (works reliably across worktrees)
+# This gets all remote branch names without the remote prefix
+remotes = %x( git for-each-ref --format='%(refname:short)' refs/remotes/ ).each_line.map do |ref|
+	# Strip remote prefix (e.g., 'origin/main' -> 'main')
+	ref.strip.sub(%r{^[^/]+/}, '')
+end.reject { |ref| ref == 'HEAD' }.uniq
 
 # Filter only local branch names
 only_locals = locals.select { |branch| !remotes.include?(branch) }.reject { |branch| branch == $develop_branch }

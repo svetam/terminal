@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Fake docker for tests: logs every call to $DOCKER_LOG, answers from STUB_* env vars.
+echo "$*" >> "$DOCKER_LOG"
+
+case "$*" in
+  "info") [[ -z "${STUB_DOWN:-}" ]] && exit 0 || exit 1 ;;
+  "system df") echo "TYPE TOTAL ACTIVE SIZE RECLAIMABLE" ;;
+  "system df --format"*) printf '%s' "${STUB_DF:-}" ;;
+  "system df -v --format {{range .Images}}"*) printf '%s' "${STUB_DF_IMAGES:-}" ;;
+  "system df -v --format {{range .Volumes}}{{.Size}}"*) printf '%s' "${STUB_DF_VOLUMES:-}" ;;
+  "buildx du"*) printf 'Reclaimable:\t%s\n' "${STUB_CACHE_RECLAIMABLE:-0B}" ;;
+  "ps -a -f"*) printf '%s' "${STUB_EXITED_SIZES:-}" ;;
+  "system df -v"*) printf '%s' "${STUB_VOLUME_SIZES:-}" ;;
+  "ps -aq -f"*) printf '%s' "${STUB_EXITED:-}" ;;
+  "ps -aq") printf '%s' "${STUB_CONTAINERS:-}" ;;
+  "inspect -f {{range .NetworkSettings"*) printf '%s' "${STUB_USED_NETWORKS:-}" ;;
+  "network ls"*) printf '%s' "${STUB_NETWORKS:-}" ;;
+  "inspect"*) printf '%s' "${STUB_USED_IMAGES:-}" ;;
+  "images -q -f dangling=true") printf '%s' "${STUB_DANGLING:-}" ;;
+  "image ls -aq --no-trunc -f dangling=true") printf '%s' "${STUB_DANGLING_IDS:-}" ;;
+  "image ls -aq --no-trunc") printf '%s' "${STUB_IMAGES:-}" ;;
+  "volume ls -q -f dangling=true") printf '%s' "${STUB_VOLUMES:-}" ;;
+  "volume ls -f dangling=true --format"*) printf '%s' "${STUB_VOLUME_LABELS:-}" ;;
+  "network prune"*) printf '%s' "${STUB_NETWORKS_PRUNED:-}" ;;
+  "builder prune"*|"buildx prune"*) printf 'Total:\t%s\n' "${STUB_CACHE_TOTAL:-0B}" ;;
+  *)
+    # rm, rmi, volume rm, prunes: succeed unless the id is listed in STUB_FAIL
+    for arg in "$@"; do
+      [[ " ${STUB_FAIL:-} " == *" $arg "* ]] && exit 1
+    done
+    ;;
+esac
+exit 0

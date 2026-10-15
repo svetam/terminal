@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+#
+# Remove unused Docker data with a one-line step progress bar.
+# Works as `docker-cleanup` and, when symlinked into ~/.docker/cli-plugins, as `docker cleanup`.
+
+set -euo pipefail
+
+if [[ "${1:-}" == "docker-cli-plugin-metadata" ]]; then
+  echo '{"SchemaVersion":"0.1.0","Vendor":"svetam","Version":"1.0.0","ShortDescription":"Clean unused Docker data"}'
+  exit 0
+fi
+
+# Docker passes the subcommand name as first argument when run as a plugin
+[[ "${1:-}" == "cleanup" ]] && shift
+
+usage() {
+  cat <<EOF
+Usage: docker-cleanup [options]
+
+Removes stopped containers, dangling (untagged) images, unused networks
+and build cache older than 7 days.
+
+Options:
+  -a, --all       Also remove all unused images and all build cache
+      --volumes   Also remove dangling volumes (DATA LOSS, not part of --all)
+  -n, --dry-run   Show what would be removed, change nothing
+  -y, --yes       Do not ask for confirmation
+  -h, --help      Show this help
+EOF
+}
+
+# Split combined short flags: -an -> -a -n
+args=()
+for arg in "$@"; do
+  if [[ "$arg" =~ ^-[a-zA-Z]{2,}$ ]]; then
+    for (( i = 1; i < ${#arg}; i++ )); do args+=("-${arg:i:1}"); done
+  else
+    args+=("$arg")
+  fi
+done
+set -- ${args[@]+"${args[@]}"}
+
+all=false
+volumes=false
+dry_run=false
+yes=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--all) all=true ;;
+    --volumes) volumes=true ;;
+    -n|--dry-run) dry_run=true ;;
+    -y|--yes) yes=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker not found" >&2
+  exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker daemon is not running" >&2
+  exit 1
+fi
+
+removed=0
+skipped=0
+
+# progress <done> <total> <label>: one-line bar spanning the terminal width
+progress() {
+  local done_count=$1 total=$2 label=$3
+  local cols counter bar_width filled i bar=""
+
+  if [[ ! -t 1 ]]; then
+    echo "$label $done_count/$total"
+    return
+  fi
+
+  cols=$(tput cols 2>/dev/null || echo 80)
+  printf -v counter ' %9s' "$done_count/$total"
+  bar_width=$(( cols - ${#label} - ${#counter} - 4 ))
+  (( bar_width < 10 )) && bar_width=10
+  filled=$(( total == 0 ? bar_width : done_count * bar_width / total ))
+
+  for (( i = 0; i < bar_width; i++ )); do
+    if (( i < filled )); then bar+="#"; else bar+="-"; fi
+  done
+
+  printf '\r\033[K%s [%s]%s' "$label" "$bar" "$counter"
+  (( done_count == total )) && printf '\n'
+  return 0
+}
+
+# remove_each <label> <remove command...>; ids are read from stdin
+remove_each() {
+  local label=$1; shift
+  local ids=() id n=0 total
+
+  while IFS= read -r id; do
+    [[ -n "$id" ]] && ids+=("$id")
+  done
+  total=${#ids[@]}
+
+  if (( total == 0 )); then
+    echo "$label: nothing to remove"
+    return
+  fi
+
+  if $dry_run; then
+    echo "$label: $total would be removed"
+    return
+  fi
+
+  progress 0 "$total" "$label"
+  for id in "${ids[@]}"; do
+    if "$@" "$id" >/dev/null 2>&1; then
+      removed=$((removed + 1))
+    else
+      skipped=$((skipped + 1))
+    fi
+    n=$((n + 1))
+    progress "$n" "$total" "$label"
+  done
+}
+
+# run_single <label> <networks|cache> <command...>: one-step prune; result is read from its output
+run_single() {
+  local label=$1 kind=$2; shift 2
+  local output result n
+
+  if $dry_run; then
+    echo "$label: would run '$*'"
+    return
+  fi
+
+  if ! output=$("$@" 2>&1); then
+    skipped=$((skipped + 1))
+    echo "$label: failed"
+    return
+  fi
+
+  if [[ "$kind" == "networks" ]]; then
+    n=$(printf '%s\n' "$output" | awk '/^Deleted Networks/ { f = 1; next } f && NF' | wc -l | tr -d ' ')
+    removed=$((removed + n))
+    result="$n removed"
+    (( n == 0 )) && result="nothing to remove"
+  else
+    n=$(printf '%s\n' "$output" | awk '/^Total/ { print $2 }' | tail -1)
+    result="reclaimed $n"
+    [[ -z "$n" || "$n" == "0B" ]] && result="nothing to remove"
+  fi
+
+  echo "$label: $result"
+}
+
+confirm() {
+  $yes && return 0
+  $dry_run && return 0
+  local answer
+  read -r -n 1 -p "$1 [y/N] " answer || true
+  [[ -n "$answer" ]] && echo
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+# unused_image_ids: images no container (running or stopped) references
+unused_image_ids() {
+  local used_ids
+  used_ids=$(docker ps -aq | xargs docker inspect -f '{{.Image}}' 2>/dev/null | sort -u || true)
+  docker image ls -aq --no-trunc | sort -u | grep -vxF -f <(echo "$used_ids") || true
+}
+
+# Size helpers for awk (docker prints decimal units: 463.7MB, 509.9kB)
+size_awk='
+  function bytes(s,   n, u) {
+    n = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+    if (u == "kB") n *= 1e3; else if (u == "MB") n *= 1e6; else if (u == "GB") n *= 1e9; else if (u == "TB") n *= 1e12
+    return n
+  }
+  function human(n) {
+    if (n >= 1e12) return sprintf("%.4gTB", n / 1e12)
+    if (n >= 1e9) return sprintf("%.4gGB", n / 1e9)
+    if (n >= 1e6) return sprintf("%.4gMB", n / 1e6)
+    if (n >= 1e3) return sprintf("%.4gkB", n / 1e3)
+    return sprintf("%dB", n)
+  }'
+
+# reclaimable_<type>: bytes the current mode (flags) would free
+reclaimable_images() {
+  local ids
+  if $all; then ids=$(unused_image_ids); else ids=$(docker image ls -aq --no-trunc -f dangling=true | sort -u); fi
+  awk -F'|' "$size_awk"'
+    NR == FNR { want[$0] = 1; next }
+    ($1 in want) { sum += bytes($2) }
+    END { print sum + 0 }' \
+    <(echo "$ids") \
+    <(docker system df -v --format '{{range .Images}}{{.ID}}|{{.UniqueSize}}
+{{end}}')
+}
+
+reclaimable_containers() {
+  docker ps -a -f status=exited -f status=created --size --format '{{.Size}}' \
+    | awk "$size_awk"'{ sum += bytes($1) } END { print sum + 0 }'
+}
+
+reclaimable_volumes() {
+  $volumes || { echo 0; return; }
+  docker system df -v --format '{{range .Volumes}}{{.Size}}|{{.Links}}
+{{end}}' | awk -F'|' "$size_awk"'$2 == 0 { sum += bytes($1) } END { print sum + 0 }'
+}
+
+reclaimable_cache() {
+  local until=()
+  $all || until=(--filter until=168h)
+  docker buildx du ${until[@]+"${until[@]}"} 2>/dev/null \
+    | awk "$size_awk"'/^Reclaimable:/ { v = bytes($2) } END { print v + 0 }'
+}
+
+# show_df [reclaimable]: disk usage per type; with an argument adds what this run would free
+show_df() {
+  local rec_images rec_containers rec_volumes rec_cache
+  if [[ "${1:-}" == "reclaimable" ]]; then
+    rec_images=$(reclaimable_images)
+    rec_containers=$(reclaimable_containers)
+    rec_volumes=$(reclaimable_volumes)
+    rec_cache=$(reclaimable_cache)
+  fi
+
+  docker system df --format '{{.Type}}|{{.TotalCount}}|{{.Active}}|{{.Size}}' \
+    | awk -F'|' -v rec="${1:-}" -v ri="${rec_images:-0}" -v rc="${rec_containers:-0}" -v rv="${rec_volumes:-0}" -v rb="${rec_cache:-0}" "$size_awk"'
+      BEGIN {
+        printf "%-16s%-10s%-10s%-10s%s\n", "TYPE", "TOTAL", "ACTIVE", "SIZE", (rec ? "RECLAIMABLE" : "")
+      }
+      {
+        out = ""
+        if (rec) {
+          r = ($1 == "Images") ? ri : ($1 == "Containers") ? rc : ($1 == "Local Volumes") ? rv : rb
+          out = human(r)
+          size = bytes($4)
+          if ($1 != "Build Cache" && size > 0) out = out sprintf(" (%.0f%%)", r * 100 / size)
+        }
+        printf "%-16s%-10s%-10s%-10s%s\n", $1, $2, $3, $4, out
+      }'
+}
+
+# unused_network_ids: custom networks no container (running or stopped) is attached to
+unused_network_ids() {
+  local used_ids
+  used_ids=$(docker ps -aq | xargs docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}}
+{{end}}' 2>/dev/null | sort -u || true)
+  docker network ls -q --no-trunc -f type=custom | sort -u | grep -vxF -f <(echo "$used_ids") || true
+}
+
+count() { grep -c . || true; }
+
+# nothing_to_clean: true when the current flags would remove nothing at all
+nothing_to_clean() {
+  local images
+  if $all; then images=$(unused_image_ids | count); else images=$(docker image ls -aq --no-trunc -f dangling=true | count); fi
+
+  (( $(docker ps -aq -f status=exited -f status=created | count) == 0 )) || return 1
+  (( images == 0 )) || return 1
+  (( $(unused_network_ids | count) == 0 )) || return 1
+  (( $(reclaimable_cache) == 0 )) || return 1
+  ! $volumes || (( $(docker volume ls -q -f dangling=true | count) == 0 ))
+}
+
+# show_kept: what this run leaves alone, and the flag that would remove it
+show_kept() {
+  local kept_images=0 kept_volumes=0
+  $all || kept_images=$(unused_image_ids | count)
+  $volumes || kept_volumes=$(docker volume ls -q -f dangling=true | count)
+
+  if (( kept_images > 0 || kept_volumes > 0 )); then
+    echo
+    (( kept_images > 0 )) && echo "Kept: $kept_images unused images, use -a to remove them"
+    (( kept_volumes > 0 )) && echo "Kept: $kept_volumes unused volumes, use --volumes to review and remove them"
+  fi
+  return 0
+}
+
+echo "Before:"
+show_df reclaimable
+echo
+
+if nothing_to_clean; then
+  echo "Nothing to clean up with these options."
+  show_kept
+  exit 0
+fi
+
+if $all; then
+  confirm "Remove stopped containers, ALL unused images, ALL build cache and unused networks?" || exit 0
+else
+  confirm "Remove stopped containers, dangling images, unused networks and build cache older than 7 days?" || exit 0
+fi
+
+# list_volumes: unused volumes with size, kind and compose project, biggest first
+list_volumes() {
+  echo "Unused volumes (size, kind, name):"
+  awk -F'|' '
+    NR == FNR { size[$1] = $2; next }
+    {
+      kind = "named"
+      if ($2 ~ /com.docker.volume.anonymous/) kind = "anonymous"
+      if (match($2, /com.docker.compose.project=[^,]+/)) kind = "compose:" substr($2, RSTART + 27, RLENGTH - 27)
+      printf "  %-10s %-24s %s\n", size[$1], kind, $1
+    }
+  ' \
+    <(docker system df -v --format '{{range .Volumes}}{{.Name}}|{{.Size}}
+{{end}}') \
+    <(docker volume ls -f dangling=true --format '{{.Name}}|{{.Labels}}') \
+    | sort -rh
+  echo
+}
+
+if $volumes; then
+  list_volumes
+  confirm "Remove these volumes? Their data is lost for good." || volumes=false
+fi
+
+remove_each "Containers      " docker rm < <(docker ps -aq -f status=exited -f status=created)
+remove_each "Dangling images " docker rmi < <(docker images -q -f dangling=true | sort -u)
+run_single "Networks        " networks docker network prune -f
+
+if $all; then
+  remove_each "Unused images   " docker rmi -f < <(unused_image_ids)
+  run_single "Build cache     " cache docker builder prune -a -f
+  command -v docker-buildx >/dev/null 2>&1 || [[ -x "$HOME/.docker/cli-plugins/docker-buildx" ]] \
+    && run_single "Buildx cache    " cache docker buildx prune -a -f
+else
+  run_single "Build cache     " cache docker builder prune -f --filter until=168h
+fi
+
+if $volumes; then
+  remove_each "Volumes         " docker volume rm < <(docker volume ls -q -f dangling=true)
+fi
+
+$dry_run && exit 0
+
+show_kept
+
+echo
+echo "Removed $removed items, $skipped could not be removed"
+echo
+echo "After:"
+show_df
+echo
+echo "Note: Docker Desktop on macOS does not shrink its disk image (Docker.raw) after cleanup."

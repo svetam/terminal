@@ -23,3 +23,7 @@ brew install zsh
 chsh -s $(which zsh)
 
 source ~/.zshrc
+
+# docker cleanup (Docker CLI plugin)
+mkdir -p ~/.docker/cli-plugins
+ln -s "$HOME/Projects/terminal/bin/docker-cleanup" ~/.docker/cli-plugins/docker-cleanup
